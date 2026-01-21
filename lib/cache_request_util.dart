@@ -1,21 +1,18 @@
 import 'dart:convert';
+import 'dart:io';
+import 'dart:math';
 
+import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_cache_request_util/api_response.dart';
-import 'package:shared_preferences/shared_preferences.dart';
+import 'package:path/path.dart' as path;
+import 'package:path_provider/path_provider.dart';
 
 /// 缓存请求工具类
 /// 支持"先缓存后网络"的请求模式，提供统一的缓存管理
 class CacheRequestUtil {
-  // 1. 改为静态延迟初始化的SharedPreferences实例
-  static late final SharedPreferences _localStorage;
   static const String _logTag = 'CacheRequestUtil';
-
-  // 2. 静态初始化方法：在使用工具类前调用（建议在APP初始化时执行）
-  static Future<void> init() async {
-    //可替换你自己的 localStorage
-    _localStorage = await SharedPreferences.getInstance();
-  }
+  static const String _cacheDirName = 'cache_request_data';
 
   /// 缓存请求方法
   ///
@@ -35,11 +32,6 @@ class CacheRequestUtil {
     void Function(String error)? onError,
     Duration? cacheDuration,
   }) async {
-    // 安全检查：确保_localStorage已初始化
-    if (!_isInitialized()) {
-      throw Exception('CacheRequestUtil未初始化，请先调用 CacheRequestUtil.init()');
-    }
-
     /// 缓存的数据（用于比较和判断是否有缓存）
     dynamic cachedJsonData;
 
@@ -89,16 +81,6 @@ class CacheRequestUtil {
     }
   }
 
-  /// 检查是否已初始化
-  static bool _isInitialized() {
-    try {
-      // 访问_localStorage的任意属性，判断是否已初始化
-      return _localStorage.containsKey('');
-    } catch (_) {
-      return false;
-    }
-  }
-
   /// 从缓存加载数据
   /// [cacheKey] 缓存键
   /// [fromJson] JSON解析函数
@@ -109,8 +91,17 @@ class CacheRequestUtil {
     Duration? cacheDuration,
   ) async {
     try {
-      final String? cachedString = _localStorage.getString(cacheKey);
-      if (cachedString == null || cachedString.isEmpty) {
+      final String filePath = await _getCacheFilePath(cacheKey);
+      final File cacheFile = File(filePath);
+
+      if (!await cacheFile.exists()) {
+        ALog.d(_logTag, 'cache not exists: $cacheKey');
+        return null;
+      }
+
+      final String cachedString = await cacheFile.readAsString();
+      if (cachedString.isEmpty) {
+        ALog.d(_logTag, 'cache file empty: $cacheKey');
         return null;
       }
 
@@ -154,7 +145,10 @@ class CacheRequestUtil {
       final Map<String, dynamic> cacheData = {'timestamp': DateTime.now().millisecondsSinceEpoch, 'content': content};
 
       final String jsonString = jsonEncode(cacheData);
-      await _localStorage.setString(cacheKey, jsonString); // 补充await，原代码遗漏
+      final String filePath = await _getCacheFilePath(cacheKey);
+      final File cacheFile = File(filePath);
+      await cacheFile.writeAsString(jsonString);
+      ALog.d(_logTag, 'cache saved: $cacheKey');
     } catch (e) {
       ALog.d(_logTag, 'cache save failed: $cacheKey, error: ${e.toString()}');
     }
@@ -165,8 +159,12 @@ class CacheRequestUtil {
   /// [cacheKey] 要清除的缓存键
   static Future<void> _clearCache(String cacheKey) async {
     try {
-      await _localStorage.remove(cacheKey); // 补充await，原代码遗漏
-      ALog.d(_logTag, 'cache cleared: $cacheKey');
+      final String filePath = await _getCacheFilePath(cacheKey);
+      final File cacheFile = File(filePath);
+      if (await cacheFile.exists()) {
+        await cacheFile.delete();
+        ALog.d(_logTag, 'cache cleared: $cacheKey');
+      }
     } catch (e) {
       ALog.d(_logTag, 'cache clear failed: $cacheKey, error: ${e.toString()}');
     }
@@ -174,11 +172,6 @@ class CacheRequestUtil {
 
   /// 手动移除缓存
   static Future<void> removeCache(String cacheKey, {bool isUserIdCache = false}) async {
-    // 安全检查
-    if (!_isInitialized()) {
-      throw Exception('CacheRequestUtil未初始化，请先调用 CacheRequestUtil.init()');
-    }
-
     final String finalCacheKey = await _getFinalCacheKey(cacheKey, isUserIdCache);
     await _clearCache(finalCacheKey);
   }
@@ -187,10 +180,17 @@ class CacheRequestUtil {
   /// [cacheKey] 缓存键
   static Future<dynamic> _getCachedJsonData(String cacheKey) async {
     try {
-      final String? cachedString = _localStorage.getString(cacheKey);
-      if (cachedString == null || cachedString.isEmpty) {
+      final String filePath = await _getCacheFilePath(cacheKey);
+      final File cacheFile = File(filePath);
+      if (!await cacheFile.exists()) {
         return null;
       }
+
+      final String cachedString = await cacheFile.readAsString();
+      if (cachedString.isEmpty) {
+        return null;
+      }
+
       final Map<String, dynamic> cachedData = jsonDecode(cachedString);
       return cachedData['content'];
     } catch (e) {
@@ -222,8 +222,8 @@ class CacheRequestUtil {
   static Future<String> _getFinalCacheKey(String cacheKey, bool cacheKeyBindUserId) async {
     if (cacheKeyBindUserId) {
       // 替换为你的AccountService实现
-      bool isLoggedIn = _localStorage.getBool('is_logged_in') ?? false;
-      bool userSuid = _localStorage.getString('user_suid') != null;
+      bool isLoggedIn = Random().nextBool();
+      String userSuid = '1234567890';
       if (!isLoggedIn) {
         throw Exception('user not logged in');
       }
@@ -231,6 +231,25 @@ class CacheRequestUtil {
     } else {
       return cacheKey;
     }
+  }
+
+  /// 获取应用缓存目录路径
+  static Future<Directory> _getCacheDirectory() async {
+    final appDocDir = await getApplicationCacheDirectory();
+    final cacheDir = Directory(path.join(appDocDir.path, _cacheDirName));
+    if (!await cacheDir.exists()) {
+      await cacheDir.create(recursive: true);
+    }
+    return cacheDir;
+  }
+
+  /// 根据缓存键获取文件路径
+  static Future<String> _getCacheFilePath(String cacheKey) async {
+    final cacheDir = await _getCacheDirectory();
+    // 使用MD5哈希生成固定长度的文件名，避免文件名非法字符问题
+    final safeKey = md5.convert(utf8.encode(cacheKey)).toString();
+    String filePath = path.join(cacheDir.path, '$safeKey.json');
+    return filePath;
   }
 }
 
