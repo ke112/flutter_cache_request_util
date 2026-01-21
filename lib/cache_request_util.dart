@@ -13,6 +13,7 @@ class CacheRequestUtil {
 
   // 2. 静态初始化方法：在使用工具类前调用（建议在APP初始化时执行）
   static Future<void> init() async {
+    //可替换你自己的 localStorage
     _localStorage = await SharedPreferences.getInstance();
   }
 
