@@ -1,9 +1,7 @@
 import 'package:flutter/material.dart';
-import 'package:flutter_cache_request_util/cache_request_util.dart';
 
 void main() {
   runApp(const MyApp());
-  CacheRequestUtil.init();
 }
 
 class MyApp extends StatelessWidget {
